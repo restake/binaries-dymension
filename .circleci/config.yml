@@ -1,0 +1,80 @@
+version: 2.1
+
+orbs:
+  go: "circleci/go@1.7.1"
+
+parameters:
+  version:
+    type: "string"
+    default: "v1.0.2-beta"
+  run:
+    type: "boolean"
+    default: false
+
+workflows:
+  dymd:
+    when: << pipeline.parameters.run >>
+    jobs:
+      - build
+      - publish:
+          context: "github-context"
+          requires:
+            - build
+
+jobs:
+  build:
+    executor:
+      name: "go/default"
+      tag: "1.21"
+    resource_class: "large"
+    steps:
+      - checkout
+      - run:
+          name: "Install required system packages"
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends build-essential curl git musl-dev
+      - run:
+          name: "Clone Dymension"
+          command: |
+            git clone -b << pipeline.parameters.version >> https://github.com/dymensionxyz/dymension
+      - restore_cache:
+          keys:
+            - 'go-{{ checksum "dymension/go.sum" }}'
+      - run:
+          name: "Build Dymension binary"
+          command: |
+            cd dymension
+
+            make CC="x86_64-linux-musl-gcc" CGO_LDFLAGS="-L." LEDGER_ENABLED=false LINK_STATICALLY=true build
+
+            # Smoke test
+            ldd ./build/dymd || :
+            ./build/dymd version --long
+      - save_cache:
+          key: 'go-{{ checksum "dymension/go.sum" }}'
+          paths:
+            - "~/go"
+      - persist_to_workspace:
+          root: "./dymension/build"
+          paths:
+            - "dymd"
+  publish:
+    executor:
+      name: "go/default"
+      tag: "1.17"
+    steps:
+      - checkout
+      - attach_workspace:
+          at: '/tmp/binaries'
+      - run:
+          name: "Install GHR"
+          command: go get github.com/tcnksm/ghr
+      - run:
+          name: "Publish Github release"
+          command: |
+            ghr -t "${GITHUB_TOKEN}" \
+              -n "<< pipeline.parameters.version >>" \
+              -b "For changes, see here: https://github.com/dymensionxyz/dymension/releases/tag/<< pipeline.parameters.version >>" \
+              -recreate "<< pipeline.parameters.version >>" \
+              /tmp/binaries/dymd
